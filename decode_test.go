@@ -415,6 +415,24 @@ func TestUnmarshalUnsupportedAndErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("MaxInt 付近の長さ宣言は加算オーバーフローせずエラー", func(t *testing.T) {
+		// 加算形の境界チェック (s.off+n) だと n が MaxInt 付近でラップして
+		// チェックをすり抜け、slice bounds panic になる (CodeRabbit 指摘の回帰テスト)
+		for _, in := range []string{
+			`s:9223372036854775807:"a";`,
+			`S:9223372036854775807:"a";`,
+			`O:9223372036854775807:"P":1:{s:1:"a";i:1;}`,
+			`a:1:{s:3:"foo";E:9223372036854775807:"X:Y";}`,
+			`a:1:{s:3:"foo";C:9223372036854775807:"X":1:{a}}`,
+			`a:1:{s:3:"foo";C:1:"X":9223372036854775807:{a}}`,
+		} {
+			var got any
+			if err := Unmarshal([]byte(in), &got); err == nil {
+				t.Errorf("%s がエラーにならない", in)
+			}
+		}
+	})
+
 	t.Run("巨大 count 宣言は即エラー (DoS 防止)", func(t *testing.T) {
 		var got []string
 		err := Unmarshal([]byte(`a:99999999:{i:0;s:1:"a";}`), &got)

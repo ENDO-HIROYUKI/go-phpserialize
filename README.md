@@ -71,6 +71,8 @@ err := dec.Unmarshal(data, &v)
 
 `Marshaler` / `Unmarshaler` インターフェースで型ごとのカスタム表現も定義できる。
 
+既知の制限: **非公開の匿名 (埋め込み) struct のフィールドは昇格しない** (encoding/json は marshal 側のみ昇格させるが、本ライブラリは reflect の read-only 値経由の panic リスクを避けるため Marshal / Unmarshal とも対称にスキップする)。
+
 ## 性能
 
 WordPress の `_wp_attachment_metadata` 相当のデコード (Apple M1 Pro):

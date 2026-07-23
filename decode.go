@@ -234,7 +234,7 @@ func (s *decodeState) parseStringBytes() ([]byte, error) {
 		if err := s.expect('"'); err != nil {
 			return nil, err
 		}
-		if s.off+n > len(s.data) {
+		if n > len(s.data)-s.off {
 			return nil, s.syntaxErr(s.off, "string length %d exceeds input", n)
 		}
 		b := s.data[s.off : s.off+n]
@@ -350,7 +350,7 @@ func (s *decodeState) parseObjectHeader() (string, int, error) {
 	if err := s.expect('"'); err != nil {
 		return "", 0, err
 	}
-	if s.off+nameLen > len(s.data) {
+	if nameLen > len(s.data)-s.off {
 		return "", 0, s.syntaxErr(s.off, "class name length %d exceeds input", nameLen)
 	}
 	name := string(s.data[s.off : s.off+nameLen])
@@ -475,7 +475,7 @@ func (s *decodeState) skipValue() error {
 		if err := s.expect('"'); err != nil {
 			return err
 		}
-		if s.off+n > len(s.data) {
+		if n > len(s.data)-s.off {
 			return s.syntaxErr(s.off, "enum length %d exceeds input", n)
 		}
 		s.off += n
@@ -499,7 +499,7 @@ func (s *decodeState) skipValue() error {
 		if err := s.expect('"'); err != nil {
 			return err
 		}
-		if s.off+nameLen > len(s.data) {
+		if nameLen > len(s.data)-s.off {
 			return s.syntaxErr(s.off, "class name length %d exceeds input", nameLen)
 		}
 		s.off += nameLen
@@ -519,7 +519,7 @@ func (s *decodeState) skipValue() error {
 		if err := s.expect('{'); err != nil {
 			return err
 		}
-		if s.off+payload > len(s.data) {
+		if payload > len(s.data)-s.off {
 			return s.syntaxErr(s.off, "custom payload length %d exceeds input", payload)
 		}
 		s.off += payload

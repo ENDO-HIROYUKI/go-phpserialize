@@ -2,9 +2,11 @@ package phpserialize
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDifferentialPHP は実 PHP との差分テスト。php コマンドが無い環境ではスキップする。
@@ -56,7 +58,9 @@ echo serialize($v);
 		if err != nil {
 			t.Fatalf("Marshal(%#v): %v", v, err)
 		}
-		cmd := exec.Command(phpBin, "-r", strings.TrimSpace(script))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, phpBin, "-r", strings.TrimSpace(script))
 		cmd.Stdin = bytes.NewReader(ours)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
