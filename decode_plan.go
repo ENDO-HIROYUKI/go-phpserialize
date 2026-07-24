@@ -831,8 +831,23 @@ func decodeAny(s *decodeState) (any, error) {
 			return nil, err
 		}
 		// PHP と同じく数値文字列キーは int に正規化し、重複キーは後勝ちで統合する。
-		intKeys := make(map[int64]any, min(n, 1024))
+		// list 形状 (キーが 0..n-1 で昇順) の間は []any へ直接積み、崩れた時点で map に
+		// 落とす。list / intKeys / strKeys はすべて遅延確保とし、string キーのみの
+		// データに追加コストを載せない。
+		var list []any
+		inList := true
+		var intKeys map[int64]any
 		var strKeys map[string]any
+		spill := func() {
+			if len(list) > 0 {
+				intKeys = make(map[int64]any, min(n, 1024))
+				for i, v := range list {
+					intKeys[int64(i)] = v
+				}
+			}
+			list = nil
+			inList = false
+		}
 		for i := 0; i < n; i++ {
 			ktag, err := s.peek()
 			if err != nil {
@@ -867,16 +882,38 @@ func decodeAny(s *decodeState) (any, error) {
 				return nil, err
 			}
 			if isInt {
-				intKeys[ik] = val
+				if inList && ik == int64(len(list)) {
+					if list == nil {
+						list = make([]any, 0, min(n, 1024))
+					}
+					list = append(list, val)
+				} else {
+					if inList {
+						spill()
+					}
+					if intKeys == nil {
+						intKeys = make(map[int64]any, min(n, 1024))
+					}
+					intKeys[ik] = val
+				}
 			} else {
+				if inList {
+					spill()
+				}
 				if strKeys == nil {
-					strKeys = make(map[string]any)
+					strKeys = make(map[string]any, min(n, 1024))
 				}
 				strKeys[sk] = val
 			}
 		}
 		if err := s.expect('}'); err != nil {
 			return nil, err
+		}
+		if inList {
+			if list == nil {
+				return []any{}, nil
+			}
+			return list, nil
 		}
 		// list 形状 (int キーの集合がちょうど {0..n-1}) → []any
 		if len(strKeys) == 0 {
@@ -894,6 +931,11 @@ func decodeAny(s *decodeState) (any, error) {
 				}
 				return out, nil
 			}
+		}
+		// string キーのみなら再構築せずそのまま返す (decodeAny 限定の最適化。
+		// typed map は既存 map の再利用・逐次更新が現行挙動のため対象外)
+		if len(intKeys) == 0 {
+			return strKeys, nil
 		}
 		out := make(map[string]any, len(intKeys)+len(strKeys))
 		for k, v := range intKeys {
