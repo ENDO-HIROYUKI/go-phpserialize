@@ -54,7 +54,7 @@ b, err := phpserialize.Marshal(m) // a:2:{s:5:"width";i:1200;s:4:"file";s:5:"a.j
 | int64 範囲外の `i:` | PHP_INT_MAX にクランプ + 警告 | エラー |
 | 末尾の余分なデータ | 警告付きで成功 | 既定はエラー。`WithAllowTrailingData()` で許容 |
 | 配列の挿入順 | 保持する | Go の map では保持できないため、Marshal はキーをソートして決定的に出力 (int 昇順 → string バイト順) |
-| 非連続キー配列 → slice | (PHP に slice の概念はない) | キー集合が `{0..n-1}` のときだけ成功、それ以外はエラー |
+| 非連続キー配列 → slice | (PHP に slice の概念はない) | 既定はキー集合が `{0..n-1}` のときだけ成功、それ以外はエラー。`WithSparseArrayPadding()` で最大キーまでゼロ値埋め |
 
 PHP に忠実な点: 文字列はバイト長で扱う (マルチバイト安全) / 数値文字列キーは int に正規化 / 重複キーは後勝ち / 要素数の不一致はエラー / 深さ上限は既定 4096 (`unserialize_max_depth` の既定と同じ)。
 
@@ -62,12 +62,19 @@ PHP に忠実な点: 文字列はバイト長で扱う (マルチバイト安全
 
 ```go
 dec := phpserialize.NewDecoder(
-    phpserialize.WithWeakTypes(),         // PHP 的な弱い型変換 (例: s:"1200" → int)。WP メタ向け
-    phpserialize.WithAllowTrailingData(), // 末尾ゴミを許容 (PHP の実挙動に相当)
+    phpserialize.WithWeakTypes(),          // PHP 的な弱い型変換 (例: s:"1200" → int)。WP メタ向け
+    phpserialize.WithSparseArrayPadding(), // 疎配列を最大キーまでゼロ値で埋めて slice にデコード
+    phpserialize.WithAllowTrailingData(),  // 末尾ゴミを許容 (PHP の実挙動に相当)
     phpserialize.WithMaxDepth(4096),
 )
 err := dec.Unmarshal(data, &v)
 ```
+
+### 疎配列の slice デコード
+
+`WithSparseArrayPadding()` を指定すると、非負整数キーまたは正準形の数値文字列キーを持つ PHP 配列を、最大キーまでゼロ値で埋めた slice にデコードする。重複キーは PHP と同じく入力順の後勝ちになる。復元後の長さは最大 `1 << 20` で、負キーと上限以上のキーはエラーになる。`[]byte` と固定長配列には適用されない。
+
+この上限は 1 つの配列あたりの復元要素数を制限するものであり、ネストした疎配列をまたぐ累積確保量までは制限しない。信頼できない入力を `[][]string` などのネストした slice 型へデコードする場合は、呼び出し側で入力サイズを制限すること。
 
 `Marshaler` / `Unmarshaler` インターフェースで型ごとのカスタム表現も定義できる。
 

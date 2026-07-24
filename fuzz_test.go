@@ -61,6 +61,33 @@ func FuzzUnmarshalNoPanic(f *testing.F) {
 	})
 }
 
+// 疎配列では入力キーから復元長を決めるため、過大キーを含む任意入力でも panic しないことを検証する。
+func FuzzSparsePaddingNoPanic(f *testing.F) {
+	for _, s := range []string{
+		`a:2:{i:0;s:1:"a";i:5;s:1:"b";}`,
+		`a:2:{i:0;s:1:"a";i:0;s:1:"b";}`,
+		`a:1:{i:1048576;i:1;}`,
+		`a:1:{i:-1;s:1:"a";}`,
+		`a:1:{s:1:"5";s:1:"a";}`,
+	} {
+		f.Add([]byte(s))
+	}
+	type sample struct {
+		Items []string `php:"items"`
+	}
+	dec := NewDecoder(WithSparseArrayPadding())
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var strings []string
+		_ = dec.Unmarshal(data, &strings)
+		var nested [][]string
+		_ = dec.Unmarshal(data, &nested)
+		var inStruct sample
+		_ = dec.Unmarshal(data, &inStruct)
+		var array [4]string
+		_ = dec.Unmarshal(data, &array)
+	})
+}
+
 // FuzzRoundTrip: デコードに成功した値は Marshal → Unmarshal で同値に戻る。
 func FuzzRoundTrip(f *testing.F) {
 	for _, s := range fuzzSeeds {

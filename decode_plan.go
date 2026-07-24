@@ -15,6 +15,9 @@ var decPlans sync.Map // reflect.Type -> decFunc
 
 var unmarshalerType = reflect.TypeFor[Unmarshaler]()
 
+// 巨大キーによる過大なメモリ確保を防ぐ。
+const maxSparseArrayKey = (1 << 20) - 1
+
 // decPlanFor は型ごとのデコード関数を返す (初回にコンパイルしてキャッシュ)。
 // 再帰型は一時的な間接参照を挟んで解決する (encoding/json と同じ手法)。
 func decPlanFor(t reflect.Type) (decFunc, error) {
@@ -343,6 +346,10 @@ func decodeByteSlice(s *decodeState, v reflect.Value) error {
 }
 
 func compileSliceDec(t reflect.Type) (decFunc, error) {
+	return compileSliceDecMode(t, true)
+}
+
+func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 	elemPlan, err := decPlanFor(t.Elem())
 	if err != nil {
 		return nil, err
@@ -368,6 +375,8 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 		// キーの検証を終えるまで一時領域にパース順で保持する
 		idxs := make([]int64, 0, min(n, 1024))
 		vals := reflect.MakeSlice(t, 0, min(n, 1024))
+		maxKey := int64(-1)
+		sparse := sparseEnabled && s.cfg.sparseArrayPadding
 		for i := 0; i < n; i++ {
 			keyOff := s.off
 			ktag, err := s.peek()
@@ -393,9 +402,15 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 			default:
 				return &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
 			}
-			// list 形状 (キー集合 = {0..n-1}) 以外は slice にデコードできない
-			if k < 0 || k >= int64(n) {
-				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with non-sequential key %d", k), GoType: t}
+			if k < 0 || (!sparse && k >= int64(n)) || (sparse && k > maxSparseArrayKey) {
+				reason := "non-sequential"
+				if sparse && k > maxSparseArrayKey {
+					reason = "too large"
+				}
+				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with %s key %d", reason, k), GoType: t}
+			}
+			if k > maxKey {
+				maxKey = k
 			}
 			ev := reflect.New(elemType).Elem()
 			if err := elemPlan(s, ev); err != nil {
@@ -407,13 +422,22 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 		if err := s.expect('}'); err != nil {
 			return err
 		}
-		out := reflect.MakeSlice(t, n, n)
-		seen := make([]bool, n)
+		outLen := n
+		if sparse {
+			outLen = int(maxKey + 1)
+		}
+		out := reflect.MakeSlice(t, outLen, outLen)
+		var seen []bool
+		if !sparse {
+			seen = make([]bool, outLen)
+		}
 		for j, k := range idxs {
-			if seen[k] {
-				return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+			if !sparse {
+				if seen[k] {
+					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+				}
+				seen[k] = true
 			}
-			seen[k] = true
 			out.Index(int(k)).Set(vals.Index(j))
 		}
 		v.Set(out)
@@ -422,7 +446,7 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 }
 
 func compileArrayDec(t reflect.Type) (decFunc, error) {
-	slicePlan, err := compileSliceDec(reflect.SliceOf(t.Elem()))
+	slicePlan, err := compileSliceDecMode(reflect.SliceOf(t.Elem()), false)
 	if err != nil {
 		return nil, err
 	}
