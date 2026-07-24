@@ -905,6 +905,88 @@ func TestUnmarshalAny(t *testing.T) {
 			t.Errorf("got %#v", got)
 		}
 	})
+
+	// 以下は #6 の最適化前に現行挙動を固定する characterization テスト。
+	t.Run("順不同だが密なキー集合 → []any", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:3:{i:2;s:1:"c";i:0;s:1:"a";i:1;s:1:"b";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"a", "b", "c"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("int キーと正準数値文字列キーの重複は後勝ち", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:2:{i:0;s:1:"a";s:1:"0";s:1:"b";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("重複キーの後も密なら []any", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:3:{i:0;s:1:"a";i:0;s:1:"b";i:1;s:1:"c";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"b", "c"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("空配列は非 nil の []any", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:0:{}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v (nil であってはならない)", got)
+		}
+	})
+
+	t.Run("string キーのみ → map[string]any", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:2:{s:1:"a";i:1;s:1:"b";i:2;}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string]any{"a": int64(1), "b": int64(2)}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("負 int キー → map", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:1:{i:-1;s:1:"a";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string]any{"-1": "a"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("途中で list 形状が崩れる → map", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:3:{i:0;s:1:"a";i:1;s:1:"b";s:1:"k";s:1:"v";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string]any{"0": "a", "1": "b", "k": "v"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("ネストした list の途中で形状が崩れる", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:2:{i:0;a:2:{i:0;s:1:"a";i:9;s:1:"b";}i:1;s:1:"c";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		want := []any{map[string]any{"0": "a", "9": "b"}, "c"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
 }
 
 func TestUnmarshalUnsupportedAndErrors(t *testing.T) {
