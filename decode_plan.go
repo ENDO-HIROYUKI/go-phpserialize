@@ -451,6 +451,11 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		// キーの検証を終えるまで一時領域にパース順で保持する
 		idxs := make([]int64, 0, min(n, maxDirectSliceElems))
 		vals := reflect.MakeSlice(t, 0, min(n, maxDirectSliceElems, byteCapElems))
+		// 厳密モードの重複キーはファストパスと同じくパース中に検出する (seen は n バイトで入力比例)。
+		var seen []bool
+		if !sparse {
+			seen = make([]bool, n)
+		}
 		maxKey := int64(-1)
 		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
 		for i := 0; i < n; i++ {
@@ -465,6 +470,12 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 					reason = "too large"
 				}
 				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with %s key %d", reason, k), GoType: t}
+			}
+			if !sparse {
+				if seen[k] {
+					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+				}
+				seen[k] = true
 			}
 			if k > maxKey {
 				maxKey = k
@@ -499,17 +510,7 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 			}
 		}
 		out := reflect.MakeSlice(t, outLen, outLen)
-		var seen []bool
-		if !sparse {
-			seen = make([]bool, outLen)
-		}
 		for j, k := range idxs {
-			if !sparse {
-				if seen[k] {
-					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
-				}
-				seen[k] = true
-			}
 			out.Index(int(k)).Set(vals.Index(j))
 		}
 		v.Set(out)
