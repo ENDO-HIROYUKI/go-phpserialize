@@ -69,11 +69,11 @@ func FuzzSparsePaddingNoPanic(f *testing.F) {
 		`a:1:{i:1048576;i:1;}`,
 		`a:1:{i:-1;s:1:"a";}`,
 		`a:1:{s:1:"5";s:1:"a";}`,
-		`a:1:{i:1048575;s:1:"a";}`,                                   // 最大キー (バジェット境界)
-		`a:2:{i:3;s:1:"a";i:3;s:1:"b";}`,                             // 重複キー (ユニークキー数でチャージ)
-		`a:2:{i:0;a:1:{i:3;s:1:"a";}i:1;a:1:{i:3;s:1:"b";}}`,         // 兄弟の疎配列 (累積チャージ)
-		`a:1:{i:0;a:1:{i:0;a:1:{i:5;s:1:"a";}}}`,                     // ネストした疎配列
-		`a:2:{i:0;a:3:{i:0;b:1;i:0;b:1;i:0;b:1;}i:1;a:1:{i:4;b:1;}}`, // 重複 + 兄弟 (残量が増えない)
+		`a:1:{i:63;s:1:"a";}`,                                // 疎キー (パディングあり)
+		`a:2:{i:3;s:1:"a";i:3;s:1:"b";}`,                     // 重複キー (ユニークキー数でチャージ)
+		`a:2:{i:0;a:1:{i:3;s:1:"a";}i:1;a:1:{i:3;s:1:"b";}}`, // 兄弟の疎配列 (累積チャージ)
+		`a:1:{i:2;a:1:{i:5;s:1:"a";}}`,                       // 外側も疎なネスト (縦の累積)
+		`a:2:{i:0;a:3:{i:0;s:1:"a";i:0;s:1:"b";i:0;s:1:"c";}i:1;a:1:{i:4;s:1:"d";}}`, // 重複 + 兄弟 (残量が増えない)
 	} {
 		f.Add([]byte(s))
 	}
@@ -82,7 +82,8 @@ func FuzzSparsePaddingNoPanic(f *testing.F) {
 	}
 	dec := NewDecoder(WithSparseArrayPadding())
 	// 小さいバジェットの Decoder で超過分岐 (ErrSparsePaddingBudget) も高頻度で通す。
-	decTight := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(8))
+	// 40 バイトなら [][]string (要素 16-24 バイト) で「1 個目は減算 → 2 個目で超過」と両分岐を通れる。
+	decTight := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(40))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var strings []string
 		_ = dec.Unmarshal(data, &strings)

@@ -382,6 +382,7 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		idxs := make([]int64, 0, min(n, 1024))
 		vals := reflect.MakeSlice(t, 0, min(n, 1024))
 		maxKey := int64(-1)
+		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
 		sparse := sparseEnabled && s.cfg.sparseArrayPadding
 		for i := 0; i < n; i++ {
 			keyOff := s.off
@@ -418,6 +419,9 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 			if k > maxKey {
 				maxKey = k
 			}
+			if k != int64(i) {
+				seq = false
+			}
 			ev := reflect.New(elemType).Elem()
 			if err := elemPlan(s, ev); err != nil {
 				return err
@@ -431,20 +435,17 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		outLen := n
 		if sparse {
 			outLen = int(maxKey + 1)
-			// 重複キーはゼロ埋めを減らさないため、エントリ数ではなくユニークキー数で
-			// パディングを算出する (O(n log n)、n は入力サイズに比例するので安全)。
-			sorted := slices.Clone(idxs)
-			slices.Sort(sorted)
-			uniq := len(slices.Compact(sorted))
-			// パディング (ゼロ埋め要素数 × 要素型サイズ) を残りバジェットにチャージする。
-			if pad := outLen - uniq; pad > 0 {
-				// 乗算のオーバーフローを避けるため除算で超過を判定する
-				if uintptr(pad) > uintptr(s.sparsePadRemaining)/esize {
-					// 積 (pad × esize) は int を超え得るため計算せず、要素数と要素サイズを個別に表示する
-					return fmt.Errorf("%w at offset %d: padding %d elements x %d bytes/element exceeds remaining %d bytes",
-						ErrSparsePaddingBudget, off, pad, esize, s.sparsePadRemaining)
+			// キーが 0..n-1 の昇順ならパディング 0 が確定するため、ユニークキー数の
+			// 算出 (Clone + Sort) をスキップする (オプション有効時の最頻パス)。
+			if !seq {
+				// 重複キーはゼロ埋めを減らさないため、エントリ数ではなくユニークキー数で
+				// パディングを算出する (O(n log n)、n は入力サイズに比例するので安全)。
+				sorted := slices.Clone(idxs)
+				slices.Sort(sorted)
+				uniq := len(slices.Compact(sorted))
+				if err := s.chargeSparsePadding(off, outLen-uniq, esize); err != nil {
+					return err
 				}
-				s.sparsePadRemaining -= int(uintptr(pad) * esize)
 			}
 		}
 		out := reflect.MakeSlice(t, outLen, outLen)

@@ -473,9 +473,16 @@ func TestSparsePaddingBudget(t *testing.T) {
 		if err == nil {
 			t.Fatalf("パディング 32 バイト > バジェット 31 バイトなのにエラーにならない: got %v", got)
 		}
-		want := "phpserialize: sparse array padding budget exceeded at offset 0: padding 4 elements x 8 bytes/element exceeds remaining 31 bytes"
-		if got := err.Error(); got != want {
-			t.Errorf("エラーメッセージが期待と一致しない\ngot:  %s\nwant: %s", got, want)
+		// 文言全体は固定せず、診断に必要な 4 つの値が読み取れることを検証する。
+		for _, part := range []string{
+			"at offset 0",
+			"padding 4 elements",
+			"8 bytes/element",
+			"remaining 31 bytes",
+		} {
+			if !strings.Contains(err.Error(), part) {
+				t.Errorf("エラーメッセージに %q が含まれない: %v", part, err)
+			}
 		}
 	})
 
@@ -495,8 +502,8 @@ func TestSparsePaddingBudget(t *testing.T) {
 			}
 		})
 		t.Run("バジェット 2 ならエラー", func(t *testing.T) {
-			// 現実装は pad = outLen - n = 4 - 2 = 2 と過少に数えるため、
-			// バジェット 2 で成功してしまう欠陥がある。
+			// 素朴に pad = outLen - エントリ数と数えると 4 - 2 = 2 に過少評価され、
+			// バジェット 2 で通ってしまう。ユニークキー数ベースの 3 バイトが正しい。
 			dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(2))
 			var got []bool
 			err := dec.Unmarshal([]byte(`a:2:{i:3;b:1;i:3;b:1;}`), &got)
@@ -545,6 +552,40 @@ func TestSparsePaddingBudget(t *testing.T) {
 			err := dec.Unmarshal([]byte(`a:2:{i:0;a:1:{i:3;b:1;}i:1;a:1:{i:3;b:1;}}`), &got)
 			if err == nil {
 				t.Fatalf("累積チャージ 6 バイト > バジェット 5 バイトなのにエラーにならない: got %v", got)
+			}
+			if !errors.Is(err, ErrSparsePaddingBudget) {
+				t.Errorf("errors.Is(err, ErrSparsePaddingBudget) = false: %v", err)
+			}
+		})
+	})
+
+	t.Run("ネストした疎配列で縦に累積する", func(t *testing.T) {
+		// Issue #4 の動機である増幅パターン: 外側も内側も疎な配列。
+		// 外側 (キー 0,9 → outLen 10・ユニーク 2) のパディングは 8 要素 × []bool の
+		// スライスヘッダサイズ (実行環境依存のため reflect で求める)。
+		// 内側 `a:1:{i:3;b:1;}` はそれぞれ 3 要素 × 1 バイト。
+		headerSize := 8 * int(reflect.TypeOf([]bool(nil)).Size())
+		total := headerSize + 3 + 3
+		const in = `a:2:{i:0;a:1:{i:3;b:1;}i:9;a:1:{i:3;b:1;}}`
+		t.Run("合算ちょうどなら成功", func(t *testing.T) {
+			dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(total))
+			var got [][]bool
+			if err := dec.Unmarshal([]byte(in), &got); err != nil {
+				t.Fatalf("縦の累積 %d バイト = バジェット %d バイトなのにエラー: %v", total, total, err)
+			}
+			want := make([][]bool, 10)
+			want[0] = []bool{false, false, false, true}
+			want[9] = []bool{false, false, false, true}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("got %v, want %v", got, want)
+			}
+		})
+		t.Run("1 バイト不足ならエラー", func(t *testing.T) {
+			dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(total-1))
+			var got [][]bool
+			err := dec.Unmarshal([]byte(in), &got)
+			if err == nil {
+				t.Fatalf("縦の累積 %d バイト > バジェット %d バイトなのにエラーにならない: got %v", total, total-1, got)
 			}
 			if !errors.Is(err, ErrSparsePaddingBudget) {
 				t.Errorf("errors.Is(err, ErrSparsePaddingBudget) = false: %v", err)
@@ -632,12 +673,55 @@ func TestSparsePaddingBudget(t *testing.T) {
 
 	t.Run("負数は無視され既定値のまま", func(t *testing.T) {
 		dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(-1))
+		// 既定より小さくなっていないこと: 既定内のチャージは成功する。
 		var got []uint32
 		if err := dec.Unmarshal([]byte(`a:1:{i:1048575;i:1;}`), &got); err != nil {
 			t.Fatalf("負数指定は無視され既定バジェットになるはずなのにエラー: %v", err)
 		}
 		if len(got) != 1<<20 {
 			t.Errorf("len(got) = %d, want %d", len(got), 1<<20)
+		}
+		// 無制限になっていないこと: 既定超過 (約 128 MiB) はエラーになる。
+		// (負数がそのまま残量に入ると uintptr 変換で実質無制限に振る舞うため、その退行を検出する)
+		var over [][128]byte
+		err := dec.Unmarshal([]byte(`a:1:{i:1048575;N;}`), &over)
+		if !errors.Is(err, ErrSparsePaddingBudget) {
+			t.Errorf("既定バジェット超過が ErrSparsePaddingBudget にならない: %v", err)
+		}
+	})
+
+	t.Run("map デコード先には適用されない", func(t *testing.T) {
+		// 疎パディングとバジェットは slice 宛てのみ。map は実エントリだけを持つ。
+		dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(0))
+		got := map[int64]int64{}
+		if err := dec.Unmarshal([]byte(`a:2:{i:0;i:7;i:5;i:9;}`), &got); err != nil {
+			t.Fatalf("map は疎パディング対象外なのにエラー: %v", err)
+		}
+		if want := map[int64]int64{0: 7, 5: 9}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("struct フィールド経由でもバジェットを共有する", func(t *testing.T) {
+		var got struct {
+			Items []bool `php:"items"`
+		}
+		dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(2))
+		err := dec.Unmarshal([]byte(`a:1:{s:5:"items";a:1:{i:3;b:1;}}`), &got)
+		if !errors.Is(err, ErrSparsePaddingBudget) {
+			t.Errorf("struct 内の疎配列 (パディング 3 バイト > バジェット 2) が ErrSparsePaddingBudget にならない: %v", err)
+		}
+	})
+
+	t.Run("固定長配列はバジェット 0 でも密なら成功する", func(t *testing.T) {
+		// 固定長配列は疎パディング自体が無効でチャージも発生しない。
+		dec := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(0))
+		var got [2]string
+		if err := dec.Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:1;s:1:"b";}`), &got); err != nil {
+			t.Fatalf("密な固定長配列なのにエラー: %v", err)
+		}
+		if want := [2]string{"a", "b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
 		}
 	})
 }
