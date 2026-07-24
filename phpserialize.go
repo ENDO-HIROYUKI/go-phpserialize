@@ -11,15 +11,24 @@ package phpserialize
 // DefaultMaxDepth は入れ子の深さの既定上限。PHP の unserialize_max_depth の既定値と同じ。
 const DefaultMaxDepth = 4096
 
+// DefaultSparsePaddingBudget は疎配列パディングの累積バジェットの既定値 (64 MiB)。
+// バジェットはゼロ埋めパディングの論理ペイロード量 (パディング要素数 × 要素型サイズ)
+// をバイト単位で数え、Unmarshal 呼び出し 1 回の中で累積する。
+const DefaultSparsePaddingBudget = 1 << 26
+
 type config struct {
-	maxDepth           int
-	weakTypes          bool
-	allowTrailing      bool
-	sparseArrayPadding bool
+	maxDepth            int
+	weakTypes           bool
+	allowTrailing       bool
+	sparseArrayPadding  bool
+	sparsePaddingBudget int
 }
 
 func defaultConfig() config {
-	return config{maxDepth: DefaultMaxDepth}
+	return config{
+		maxDepth:            DefaultMaxDepth,
+		sparsePaddingBudget: DefaultSparsePaddingBudget,
+	}
 }
 
 // Option は Decoder / Encoder の動作を調整する。
@@ -43,6 +52,18 @@ func WithWeakTypes() Option {
 // WithSparseArrayPadding は trim21/go-phpserialize v0.0.x 互換の疎配列を扱うために使う。
 func WithSparseArrayPadding() Option {
 	return func(c *config) { c.sparseArrayPadding = true }
+}
+
+// WithSparsePaddingBudget は疎配列パディングの累積バジェット (バイト) を変更する。
+// 既定は DefaultSparsePaddingBudget (64 MiB)。0 を指定すると穴のある配列を常にエラーに
+// する。負数は無視される。バジェットは Unmarshal 呼び出しごとにリセットされ、超過すると
+// ErrSparsePaddingBudget を返す。WithSparseArrayPadding なしでは効果がない。
+func WithSparsePaddingBudget(n int) Option {
+	return func(c *config) {
+		if n >= 0 {
+			c.sparsePaddingBudget = n
+		}
+	}
 }
 
 // WithAllowTrailingData は値の後に余分なバイトが残っていてもエラーにしない。

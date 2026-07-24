@@ -34,6 +34,17 @@ func BenchmarkUnmarshalStringSlice(b *testing.B) {
 	}
 }
 
+// WithSparseArrayPadding 有効時の密データ (最頻パス) の回帰検知用。
+func BenchmarkUnmarshalStringSliceSparse(b *testing.B) {
+	dec := NewDecoder(WithSparseArrayPadding())
+	for b.Loop() {
+		var v []string
+		if err := dec.Unmarshal(benchList, &v); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkMarshalStruct(b *testing.B) {
 	size := 5000
 	in := attachmentMeta{

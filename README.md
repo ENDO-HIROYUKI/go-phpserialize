@@ -63,8 +63,9 @@ PHP に忠実な点: 文字列はバイト長で扱う (マルチバイト安全
 ```go
 dec := phpserialize.NewDecoder(
     phpserialize.WithWeakTypes(),          // PHP 的な弱い型変換 (例: s:"1200" → int)。WP メタ向け
-    phpserialize.WithSparseArrayPadding(), // 疎配列を最大キーまでゼロ値で埋めて slice にデコード
-    phpserialize.WithAllowTrailingData(),  // 末尾ゴミを許容 (PHP の実挙動に相当)
+    phpserialize.WithSparseArrayPadding(),        // 疎配列を最大キーまでゼロ値で埋めて slice にデコード
+    phpserialize.WithSparsePaddingBudget(64<<20), // 疎パディングの累積上限 (バイト)。既定 64 MiB
+    phpserialize.WithAllowTrailingData(),         // 末尾ゴミを許容 (PHP の実挙動に相当)
     phpserialize.WithMaxDepth(4096),
 )
 err := dec.Unmarshal(data, &v)
@@ -74,7 +75,9 @@ err := dec.Unmarshal(data, &v)
 
 `WithSparseArrayPadding()` を指定すると、非負整数キーまたは正準形の数値文字列キーを持つ PHP 配列を、最大キーまでゼロ値で埋めた slice にデコードする。重複キーは PHP と同じく入力順の後勝ちになる。復元後の長さは最大 `1 << 20` で、負キーと上限以上のキーはエラーになる。`[]byte` と固定長配列には適用されない。
 
-この上限は 1 つの配列あたりの復元要素数を制限するものであり、ネストした疎配列をまたぐ累積確保量までは制限しない。信頼できない入力を `[][]string` などのネストした slice 型へデコードする場合は、呼び出し側で入力サイズを制限すること。
+加えて、ゼロ埋めパディングの累積量 (パディング要素数 × 要素型サイズで換算) はデコード 1 回あたり既定 64 MiB (`DefaultSparsePaddingBudget`) までに制限され、超過すると `ErrSparsePaddingBudget` を返す。この制限はネストした疎配列・兄弟の疎配列をまたいで累積するため、小さな入力から巨大なゼロ埋め確保を誘発する増幅パターンを既定で防ぐ。上限は `WithSparsePaddingBudget(n)` (バイト単位。0 は穴のある配列の禁止、負数は無視) で増減できる。バジェットは `Unmarshal` 呼び出しごとにリセットされ、カスタム `Unmarshaler` が内部で再デコードする場合は別バジェットになる (その場合の制限は利用者側の責任)。
+
+このバジェットが制限するのはゼロ埋め領域の論理ペイロード量であり、デコード全体の総確保量ではない。巨大な固定サイズ要素型 (例: `[][65536]byte`) を宛先にした場合の実要素側の確保・一時領域・アロケータのオーバーヘッドは対象外のため、信頼できない入力をデコードする場合は引き続き呼び出し側で入力サイズを制限すること。
 
 `Marshaler` / `Unmarshaler` インターフェースで型ごとのカスタム表現も定義できる。
 

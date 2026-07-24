@@ -17,7 +17,7 @@ func (d *Decoder) Unmarshal(data []byte, v any) error {
 	if err != nil {
 		return err
 	}
-	s := &decodeState{data: data, cfg: &d.cfg}
+	s := &decodeState{data: data, cfg: &d.cfg, sparsePadRemaining: d.cfg.sparsePaddingBudget}
 	if err := plan(s, rv.Elem()); err != nil {
 		return err
 	}
@@ -32,6 +32,8 @@ type decodeState struct {
 	off   int
 	depth int
 	cfg   *config
+	// sparsePadRemaining は疎配列パディングの残りバジェット (バイト)。デコード 1 回ごとにリセットされる。
+	sparsePadRemaining int
 }
 
 func (s *decodeState) syntaxErr(off int, format string, args ...any) error {
@@ -73,6 +75,22 @@ func (s *decodeState) enter() error {
 }
 
 func (s *decodeState) leave() { s.depth-- }
+
+// chargeSparsePadding は疎配列のゼロ埋めパディング (pad 要素 × esize バイト) を
+// 残りバジェットにチャージし、超過なら ErrSparsePaddingBudget を返す。
+func (s *decodeState) chargeSparsePadding(off, pad int, esize uintptr) error {
+	if pad <= 0 {
+		return nil
+	}
+	// 乗算のオーバーフローを避けるため除算で超過を判定する
+	if uintptr(pad) > uintptr(s.sparsePadRemaining)/esize {
+		// 積 (pad × esize) は int を超え得るため計算せず、要素数と要素サイズを個別に表示する
+		return fmt.Errorf("%w at offset %d: padding %d elements x %d bytes/element exceeds remaining %d bytes",
+			ErrSparsePaddingBudget, off, pad, esize, s.sparsePadRemaining)
+	}
+	s.sparsePadRemaining -= int(uintptr(pad) * esize)
+	return nil
+}
 
 // parseIntBody は符号付き 10 進整数を読み取る (終端記号は消費しない)。
 // int64 の範囲外はエラー (PHP は PHP_INT_MAX へクランプ+警告するが、本ライブラリは厳密)。
