@@ -2,8 +2,10 @@ package phpserialize
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -756,6 +758,52 @@ func TestSparsePaddingBudgetConcurrent(t *testing.T) {
 	for failure := range failures {
 		t.Error(failure)
 	}
+}
+
+func TestSliceDecodePathBoundary(t *testing.T) {
+	// 厳密モードの直接書き込みファストパスは n <= 1024 または n×要素サイズ <= 1 MiB に
+	// 限られる。[4096]byte (4 KiB/要素) では n=1024 がファストパス、n=1025 がバッファ経路。
+	// 両経路が同じ結果を返すことを境界で固定する。
+	build := func(n int) []byte {
+		var b []byte
+		b = append(b, []byte(fmt.Sprintf("a:%d:{", n))...)
+		for i := 0; i < n; i++ {
+			b = append(b, []byte(fmt.Sprintf("i:%d;N;", i))...)
+		}
+		return append(b, '}')
+	}
+	for _, n := range []int{1024, 1025} {
+		var got [][4096]byte
+		if err := Unmarshal(build(n), &got); err != nil {
+			t.Fatalf("n=%d: %v", n, err)
+		}
+		if len(got) != n {
+			t.Errorf("n=%d: len(got) = %d", n, len(got))
+		}
+	}
+
+	t.Run("上限超えの不正入力で全量先行確保しない", func(t *testing.T) {
+		// n=100000 × [4096]byte (約 400 MiB 相当) を宣言しつつ先頭要素で不正になる入力。
+		// バッファ経路に落ちるため、確保量は一時バッファ (最大 1024 要素 ≈ 4 MiB) に留まる。
+		var b []byte
+		b = append(b, []byte("a:100000:{")...)
+		for len(b) < 700_000 { // ヘッダ検証 (宣言個数 × 最小要素サイズ <= 残り入力) を通す長さ
+			b = append(b, []byte("b:1;")...)
+		}
+		b = append(b, '}')
+		var ms1, ms2 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&ms1)
+		var got [][4096]byte
+		err := Unmarshal(b, &got)
+		runtime.ReadMemStats(&ms2)
+		if err == nil {
+			t.Fatal("不正入力なのにエラーにならない")
+		}
+		if delta := ms2.TotalAlloc - ms1.TotalAlloc; delta > 100<<20 {
+			t.Errorf("失敗時の確保量が過大: %d bytes (全量先行確保が疑われる)", delta)
+		}
+	})
 }
 
 func TestUnmarshalMap(t *testing.T) {

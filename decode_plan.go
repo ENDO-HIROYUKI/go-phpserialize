@@ -350,6 +350,32 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 	return compileSliceDecMode(t, true)
 }
 
+// parseSliceIntKey は slice デコード用の配列キーを読む。
+// PHP は数値文字列キーを int に正規化する (unserialize 時も同様)。
+func (s *decodeState) parseSliceIntKey(t reflect.Type) (int64, error) {
+	keyOff := s.off
+	ktag, err := s.peek()
+	if err != nil {
+		return 0, err
+	}
+	switch ktag {
+	case 'i':
+		return s.parseInt()
+	case 's', 'S':
+		b, err := s.parseStringBytes()
+		if err != nil {
+			return 0, err
+		}
+		k, ok := canonicalIntString(string(b))
+		if !ok {
+			return 0, &TypeError{Offset: keyOff, PHPType: "array with string key", GoType: t}
+		}
+		return k, nil
+	default:
+		return 0, &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
+	}
+}
+
 func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 	elemPlan, err := decPlanFor(t.Elem())
 	if err != nil {
@@ -378,36 +404,48 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		if err != nil {
 			return err
 		}
+		sparse := sparseEnabled && s.cfg.sparseArrayPadding
+		// 厳密モードのファストパス: キー集合が {0..n-1} に限られるため、先に確保した
+		// out へ直接デコードし、要素ごとの一時値の確保と伸長を排除する。
+		// 先行確保は「長いが途中で不正になる入力 × 大きな要素型」で失敗時の確保量を
+		// 悪化させるため、n × 要素サイズが上限内のときに限る (超過時はバッファ経路)。
+		if !sparse && (n <= 1024 || uintptr(n) <= (1<<20)/esize) {
+			out := reflect.MakeSlice(t, n, n)
+			seen := make([]bool, n)
+			for i := 0; i < n; i++ {
+				keyOff := s.off
+				k, err := s.parseSliceIntKey(t)
+				if err != nil {
+					return err
+				}
+				if k < 0 || k >= int64(n) {
+					return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with non-sequential key %d", k), GoType: t}
+				}
+				if seen[k] {
+					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+				}
+				seen[k] = true
+				if err := elemPlan(s, out.Index(int(k))); err != nil {
+					return err
+				}
+			}
+			if err := s.expect('}'); err != nil {
+				return err
+			}
+			v.Set(out)
+			return nil
+		}
+		// バッファ経路 (疎モード / 上限超えの厳密モード):
 		// キーの検証を終えるまで一時領域にパース順で保持する
 		idxs := make([]int64, 0, min(n, 1024))
 		vals := reflect.MakeSlice(t, 0, min(n, 1024))
 		maxKey := int64(-1)
 		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
-		sparse := sparseEnabled && s.cfg.sparseArrayPadding
 		for i := 0; i < n; i++ {
 			keyOff := s.off
-			ktag, err := s.peek()
+			k, err := s.parseSliceIntKey(t)
 			if err != nil {
 				return err
-			}
-			var k int64
-			switch ktag {
-			case 'i':
-				if k, err = s.parseInt(); err != nil {
-					return err
-				}
-			case 's', 'S':
-				// PHP は数値文字列キーを int に正規化する (unserialize 時も同様)
-				b, err := s.parseStringBytes()
-				if err != nil {
-					return err
-				}
-				var ok bool
-				if k, ok = canonicalIntString(string(b)); !ok {
-					return &TypeError{Offset: keyOff, PHPType: "array with string key", GoType: t}
-				}
-			default:
-				return &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
 			}
 			if k < 0 || (!sparse && k >= int64(n)) || (sparse && k > maxSparseArrayKey) {
 				reason := "non-sequential"
