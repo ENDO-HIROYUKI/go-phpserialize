@@ -69,6 +69,11 @@ func FuzzSparsePaddingNoPanic(f *testing.F) {
 		`a:1:{i:1048576;i:1;}`,
 		`a:1:{i:-1;s:1:"a";}`,
 		`a:1:{s:1:"5";s:1:"a";}`,
+		`a:1:{i:1048575;s:1:"a";}`,                                   // 最大キー (バジェット境界)
+		`a:2:{i:3;s:1:"a";i:3;s:1:"b";}`,                             // 重複キー (ユニークキー数でチャージ)
+		`a:2:{i:0;a:1:{i:3;s:1:"a";}i:1;a:1:{i:3;s:1:"b";}}`,         // 兄弟の疎配列 (累積チャージ)
+		`a:1:{i:0;a:1:{i:0;a:1:{i:5;s:1:"a";}}}`,                     // ネストした疎配列
+		`a:2:{i:0;a:3:{i:0;b:1;i:0;b:1;i:0;b:1;}i:1;a:1:{i:4;b:1;}}`, // 重複 + 兄弟 (残量が増えない)
 	} {
 		f.Add([]byte(s))
 	}
@@ -76,6 +81,8 @@ func FuzzSparsePaddingNoPanic(f *testing.F) {
 		Items []string `php:"items"`
 	}
 	dec := NewDecoder(WithSparseArrayPadding())
+	// 小さいバジェットの Decoder で超過分岐 (ErrSparsePaddingBudget) も高頻度で通す。
+	decTight := NewDecoder(WithSparseArrayPadding(), WithSparsePaddingBudget(8))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var strings []string
 		_ = dec.Unmarshal(data, &strings)
@@ -85,6 +92,8 @@ func FuzzSparsePaddingNoPanic(f *testing.F) {
 		_ = dec.Unmarshal(data, &inStruct)
 		var array [4]string
 		_ = dec.Unmarshal(data, &array)
+		var tight [][]string
+		_ = decTight.Unmarshal(data, &tight)
 	})
 }
 

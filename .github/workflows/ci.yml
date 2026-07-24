@@ -27,5 +27,7 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzUnmarshalNoPanic -fuzztime=60s .
       - name: fuzz (round-trip, 60s)
         run: go test -run='^$' -fuzz=FuzzRoundTrip -fuzztime=60s .
+      - name: fuzz (sparse-padding no-panic, 60s)
+        run: go test -run='^$' -fuzz=FuzzSparsePaddingNoPanic -fuzztime=60s .
       - name: bench (参考値)
         run: go test -run='^$' -bench . -benchtime=1s .
