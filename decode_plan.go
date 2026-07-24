@@ -19,9 +19,10 @@ var unmarshalerType = reflect.TypeFor[Unmarshaler]()
 // 巨大キーによる過大なメモリ確保を防ぐ。
 const maxSparseArrayKey = (1 << 20) - 1
 
-// 厳密モードの直接書き込みファストパスの上限。要素数上限 (maxDirectSliceElems) は
-// バッファ経路の一時領域の先行確保上限 (min(n, maxDirectSliceElems)) と対の値で、
-// どちらの経路でも失敗時の先行確保が同水準に収まることを保証する。
+// 厳密モードのスライスデコードにおける「パース前の先行確保」の上限。
+// 直接書き込みファストパスは n×要素サイズ <= maxDirectSliceBytes のときに限り、
+// バッファ経路の一時領域の初期容量も同じバイト上限 (かつ maxDirectSliceElems 要素) で
+// 抑える。これにより要素型のサイズによらず、失敗時の先行確保が 1 MiB を超えない。
 const (
 	maxDirectSliceElems = 1024
 	maxDirectSliceBytes = 1 << 20
@@ -395,6 +396,8 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 	if esize == 0 {
 		esize = 1
 	}
+	// 先行確保をバイト換算で抑えるための要素数上限 (esize >= 1 なので除算は安全)。
+	byteCapElems := int(maxDirectSliceBytes / esize)
 	return withNull(func(s *decodeState, v reflect.Value) error {
 		off := s.off
 		tag, err := s.peek()
@@ -416,9 +419,9 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		// 厳密モードのファストパス: キー集合が {0..n-1} に限られるため、先に確保した
 		// out へ直接デコードし、要素ごとの一時値の確保と伸長を排除する。
 		// 先行確保は「長いが途中で不正になる入力 × 大きな要素型」で失敗時の確保量を
-		// 悪化させるため、n <= maxDirectSliceElems (バッファ経路の先行確保と同水準)
-		// または n × 要素サイズ <= maxDirectSliceBytes のときに限る (超過時はバッファ経路)。
-		if !sparse && (n <= maxDirectSliceElems || uintptr(n) <= maxDirectSliceBytes/esize) {
+		// 悪化させるため、n × 要素サイズ <= maxDirectSliceBytes のときに限る
+		// (超過時はバッファ経路)。
+		if !sparse && n <= byteCapElems {
 			out := reflect.MakeSlice(t, n, n)
 			seen := make([]bool, n)
 			for i := 0; i < n; i++ {
@@ -447,7 +450,7 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		// バッファ経路 (疎モード / 上限超えの厳密モード):
 		// キーの検証を終えるまで一時領域にパース順で保持する
 		idxs := make([]int64, 0, min(n, maxDirectSliceElems))
-		vals := reflect.MakeSlice(t, 0, min(n, maxDirectSliceElems))
+		vals := reflect.MakeSlice(t, 0, min(n, maxDirectSliceElems, byteCapElems))
 		maxKey := int64(-1)
 		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
 		for i := 0; i < n; i++ {

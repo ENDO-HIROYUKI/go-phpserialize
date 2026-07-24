@@ -794,9 +794,10 @@ func TestSliceDecodePathBoundary(t *testing.T) {
 		return append(b, '}')
 	}
 
-	t.Run("要素数上限の境界 (要素サイズ条件は超過)", func(t *testing.T) {
-		// [4096]byte では n=maxDirectSliceElems がファストパス、+1 がバッファ経路。
-		for _, n := range []int{maxDirectSliceElems, maxDirectSliceElems + 1} {
+	t.Run("大きい要素型のバイト数上限の境界", func(t *testing.T) {
+		// [4096]byte (4 KiB/要素) では n=256 でちょうど 1 MiB → ファストパス、
+		// n=257 でバッファ経路。
+		for _, n := range []int{maxDirectSliceBytes / 4096, maxDirectSliceBytes/4096 + 1} {
 			var got [][4096]byte
 			if err := Unmarshal(build(n, func(int) string { return "N;" }), &got); err != nil {
 				t.Fatalf("n=%d: %v", n, err)
@@ -827,7 +828,8 @@ func TestSliceDecodePathBoundary(t *testing.T) {
 	})
 
 	t.Run("バッファ経路でも重複キーはエラー", func(t *testing.T) {
-		// n=1025 × [4096]byte はバッファ経路。ファストパスと同じく TypeError になる。
+		// n=1025 × [4096]byte (4 MiB 相当 > バイト上限) はバッファ経路。
+		// ファストパスと同じく TypeError になる。
 		b := build(maxDirectSliceElems+1, func(int) string { return "N;" })
 		in := strings.Replace(string(b), "i:1;N;", "i:0;N;", 1) // キー 1 を 0 に重複させる
 		var got [][4096]byte
