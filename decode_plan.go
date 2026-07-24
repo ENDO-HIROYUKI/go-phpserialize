@@ -403,7 +403,11 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 				return &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
 			}
 			if k < 0 || (!sparse && k >= int64(n)) || (sparse && k > maxSparseArrayKey) {
-				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with non-sequential key %d", k), GoType: t}
+				reason := "non-sequential"
+				if sparse && k > maxSparseArrayKey {
+					reason = "too large"
+				}
+				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with %s key %d", reason, k), GoType: t}
 			}
 			if k > maxKey {
 				maxKey = k

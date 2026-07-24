@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -259,8 +260,12 @@ func TestSparseArrayPadding(t *testing.T) {
 
 		var tooLarge []bool
 		var te *TypeError
-		if err := dec.Unmarshal([]byte(`a:1:{i:1048576;b:1;}`), &tooLarge); !errors.As(err, &te) {
+		err := dec.Unmarshal([]byte(`a:1:{i:1048576;b:1;}`), &tooLarge)
+		if !errors.As(err, &te) {
 			t.Errorf("TypeError が返らない: %v", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "too large") {
+			t.Errorf("エラーメッセージに too large が含まれない: %v", err)
 		}
 	})
 
