@@ -54,7 +54,7 @@ b, err := phpserialize.Marshal(m) // a:2:{s:5:"width";i:1200;s:4:"file";s:5:"a.j
 | int64 範囲外の `i:` | PHP_INT_MAX にクランプ + 警告 | エラー |
 | 末尾の余分なデータ | 警告付きで成功 | 既定はエラー。`WithAllowTrailingData()` で許容 |
 | 配列の挿入順 | 保持する | Go の map では保持できないため、Marshal はキーをソートして決定的に出力 (int 昇順 → string バイト順) |
-| 非連続キー配列 → slice | (PHP に slice の概念はない) | キー集合が `{0..n-1}` のときだけ成功、それ以外はエラー |
+| 非連続キー配列 → slice | (PHP に slice の概念はない) | 既定はキー集合が `{0..n-1}` のときだけ成功、それ以外はエラー。`WithSparseArrayPadding()` で最大キーまでゼロ値埋め |
 
 PHP に忠実な点: 文字列はバイト長で扱う (マルチバイト安全) / 数値文字列キーは int に正規化 / 重複キーは後勝ち / 要素数の不一致はエラー / 深さ上限は既定 4096 (`unserialize_max_depth` の既定と同じ)。
 
