@@ -9,6 +9,15 @@ import (
 	"sync"
 )
 
+// encBufPool はエンコードバッファの再利用プール。状態汚染を持ち込まないよう
+// []byte だけをプールし、encodeState (depth / cfg) は呼び出しごとに作る。
+// 初期容量 512 は WP メタ等の典型ペイロードを 1 確保で収める目安。
+var encBufPool = sync.Pool{New: func() any { b := make([]byte, 0, 512); return &b }}
+
+// maxPooledEncBuf を超える容量のバッファはプールへ戻さない
+// (巨大 Marshal 1 回によるメモリ滞留と、エンコード済みデータの長期保持を防ぐ)。
+const maxPooledEncBuf = 256 << 10
+
 // Marshal は v を PHP シリアライズ形式にエンコードする。
 //
 // 決定性のため map はキーをソートして出力する (int 昇順 → string バイト順)。
@@ -22,11 +31,21 @@ func (e *Encoder) Marshal(v any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &encodeState{cfg: &e.cfg}
+	bp := encBufPool.Get().(*[]byte)
+	s := &encodeState{buf: (*bp)[:0], cfg: &e.cfg}
+	// 返り値のコピーを作った後にのみバッファをプールへ戻す (成否・panic を問わず返却)。
+	defer func() {
+		if cap(s.buf) <= maxPooledEncBuf {
+			*bp = s.buf[:0]
+			encBufPool.Put(bp)
+		}
+	}()
 	if err := plan(s, rv); err != nil {
 		return nil, err
 	}
-	return s.buf, nil
+	out := make([]byte, len(s.buf))
+	copy(out, s.buf)
+	return out, nil
 }
 
 type encodeState struct {

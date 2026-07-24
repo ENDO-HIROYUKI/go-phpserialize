@@ -36,33 +36,48 @@ type decodeState struct {
 	sparsePadRemaining int
 }
 
+// syntaxErr はエラーパス専用。noinline で呼び出し元のインライン化予算から
+// エラー構築コストを外す (ホットパスの expect 等をインライン化可能に保つ)。
+//
+//go:noinline
 func (s *decodeState) syntaxErr(off int, format string, args ...any) error {
 	return &SyntaxError{Offset: off, Msg: fmt.Sprintf(format, args...)}
 }
 
+// errUnexpectedEnd はエラーパス専用。noinline で呼び出し元 (peek 等) の
+// インライン化予算からエラー構築コストを外す。
+//
+//go:noinline
 func (s *decodeState) errUnexpectedEnd() error {
 	return s.syntaxErr(len(s.data), "unexpected end of data")
 }
 
-// peek は現在位置のバイトを消費せず返す。
+// peek は現在位置のバイトを消費せず返す (ホットパスなのでインライン化可能な形を保つ)。
 func (s *decodeState) peek() (byte, error) {
-	if s.off >= len(s.data) {
-		return 0, s.errUnexpectedEnd()
+	if s.off < len(s.data) {
+		return s.data[s.off], nil
 	}
-	return s.data[s.off], nil
+	return 0, s.errUnexpectedEnd()
 }
 
 // expect は現在位置のバイトが c であることを検証して 1 バイト進める。
+// ホットパスを短く保つためエラー構築は expectSlow に外出しする
+// (それでもインライン化予算には僅かに届かない。peek はインライン化される)。
 func (s *decodeState) expect(c byte) error {
+	if s.off < len(s.data) && s.data[s.off] == c {
+		s.off++
+		return nil
+	}
+	return s.expectSlow(c)
+}
+
+//go:noinline
+func (s *decodeState) expectSlow(c byte) error {
 	b, err := s.peek()
 	if err != nil {
 		return err
 	}
-	if b != c {
-		return s.syntaxErr(s.off, "expected %q, got %q", c, b)
-	}
-	s.off++
-	return nil
+	return s.syntaxErr(s.off, "expected %q, got %q", c, b)
 }
 
 // enter / leave は入れ子の深さを数える。

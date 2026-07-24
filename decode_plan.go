@@ -19,6 +19,15 @@ var unmarshalerType = reflect.TypeFor[Unmarshaler]()
 // 巨大キーによる過大なメモリ確保を防ぐ。
 const maxSparseArrayKey = (1 << 20) - 1
 
+// 厳密モードのスライスデコードにおける「パース前の先行確保」の上限。
+// 直接書き込みファストパスは n×要素サイズ <= maxDirectSliceBytes のときに限り、
+// バッファ経路の一時領域の初期容量も同じバイト上限 (かつ maxDirectSliceElems 要素) で
+// 抑える。これにより要素型のサイズによらず、失敗時の先行確保が 1 MiB を超えない。
+const (
+	maxDirectSliceElems = 1024
+	maxDirectSliceBytes = 1 << 20
+)
+
 // decPlanFor は型ごとのデコード関数を返す (初回にコンパイルしてキャッシュ)。
 // 再帰型は一時的な間接参照を挟んで解決する (encoding/json と同じ手法)。
 func decPlanFor(t reflect.Type) (decFunc, error) {
@@ -350,6 +359,32 @@ func compileSliceDec(t reflect.Type) (decFunc, error) {
 	return compileSliceDecMode(t, true)
 }
 
+// parseSliceIntKey は slice デコード用の配列キーを読む。
+// PHP は数値文字列キーを int に正規化する (unserialize 時も同様)。
+func (s *decodeState) parseSliceIntKey(t reflect.Type) (int64, error) {
+	keyOff := s.off
+	ktag, err := s.peek()
+	if err != nil {
+		return 0, err
+	}
+	switch ktag {
+	case 'i':
+		return s.parseInt()
+	case 's', 'S':
+		b, err := s.parseStringBytes()
+		if err != nil {
+			return 0, err
+		}
+		k, ok := canonicalIntString(string(b))
+		if !ok {
+			return 0, &TypeError{Offset: keyOff, PHPType: "array with string key", GoType: t}
+		}
+		return k, nil
+	default:
+		return 0, &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
+	}
+}
+
 func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 	elemPlan, err := decPlanFor(t.Elem())
 	if err != nil {
@@ -361,6 +396,8 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 	if esize == 0 {
 		esize = 1
 	}
+	// 先行確保をバイト換算で抑えるための要素数上限 (esize >= 1 なので除算は安全)。
+	byteCapElems := int(maxDirectSliceBytes / esize)
 	return withNull(func(s *decodeState, v reflect.Value) error {
 		off := s.off
 		tag, err := s.peek()
@@ -378,36 +415,54 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		if err != nil {
 			return err
 		}
-		// キーの検証を終えるまで一時領域にパース順で保持する
-		idxs := make([]int64, 0, min(n, 1024))
-		vals := reflect.MakeSlice(t, 0, min(n, 1024))
-		maxKey := int64(-1)
-		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
 		sparse := sparseEnabled && s.cfg.sparseArrayPadding
-		for i := 0; i < n; i++ {
-			keyOff := s.off
-			ktag, err := s.peek()
-			if err != nil {
-				return err
-			}
-			var k int64
-			switch ktag {
-			case 'i':
-				if k, err = s.parseInt(); err != nil {
-					return err
-				}
-			case 's', 'S':
-				// PHP は数値文字列キーを int に正規化する (unserialize 時も同様)
-				b, err := s.parseStringBytes()
+		// 厳密モードのファストパス: キー集合が {0..n-1} に限られるため、先に確保した
+		// out へ直接デコードし、要素ごとの一時値の確保と伸長を排除する。
+		// 先行確保は「長いが途中で不正になる入力 × 大きな要素型」で失敗時の確保量を
+		// 悪化させるため、n × 要素サイズ <= maxDirectSliceBytes のときに限る
+		// (超過時はバッファ経路)。
+		if !sparse && n <= byteCapElems {
+			out := reflect.MakeSlice(t, n, n)
+			seen := make([]bool, n)
+			for i := 0; i < n; i++ {
+				keyOff := s.off
+				k, err := s.parseSliceIntKey(t)
 				if err != nil {
 					return err
 				}
-				var ok bool
-				if k, ok = canonicalIntString(string(b)); !ok {
-					return &TypeError{Offset: keyOff, PHPType: "array with string key", GoType: t}
+				if k < 0 || k >= int64(n) {
+					return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with non-sequential key %d", k), GoType: t}
 				}
-			default:
-				return &TypeError{Offset: keyOff, PHPType: "array with " + phpTypeName(ktag) + " key", GoType: t}
+				if seen[k] {
+					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+				}
+				seen[k] = true
+				if err := elemPlan(s, out.Index(int(k))); err != nil {
+					return err
+				}
+			}
+			if err := s.expect('}'); err != nil {
+				return err
+			}
+			v.Set(out)
+			return nil
+		}
+		// バッファ経路 (疎モード / 上限超えの厳密モード):
+		// キーの検証を終えるまで一時領域にパース順で保持する
+		idxs := make([]int64, 0, min(n, maxDirectSliceElems))
+		vals := reflect.MakeSlice(t, 0, min(n, maxDirectSliceElems, byteCapElems))
+		// 厳密モードの重複キーはファストパスと同じくパース中に検出する (seen は n バイトで入力比例)。
+		var seen []bool
+		if !sparse {
+			seen = make([]bool, n)
+		}
+		maxKey := int64(-1)
+		seq := true // キーが 0..n-1 の昇順 (密な PHP list) かどうか
+		for i := 0; i < n; i++ {
+			keyOff := s.off
+			k, err := s.parseSliceIntKey(t)
+			if err != nil {
+				return err
 			}
 			if k < 0 || (!sparse && k >= int64(n)) || (sparse && k > maxSparseArrayKey) {
 				reason := "non-sequential"
@@ -415,6 +470,12 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 					reason = "too large"
 				}
 				return &TypeError{Offset: keyOff, PHPType: fmt.Sprintf("array with %s key %d", reason, k), GoType: t}
+			}
+			if !sparse {
+				if seen[k] {
+					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
+				}
+				seen[k] = true
 			}
 			if k > maxKey {
 				maxKey = k
@@ -449,17 +510,7 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 			}
 		}
 		out := reflect.MakeSlice(t, outLen, outLen)
-		var seen []bool
-		if !sparse {
-			seen = make([]bool, outLen)
-		}
 		for j, k := range idxs {
-			if !sparse {
-				if seen[k] {
-					return &TypeError{Offset: off, PHPType: fmt.Sprintf("array with duplicate key %d", k), GoType: t}
-				}
-				seen[k] = true
-			}
 			out.Index(int(k)).Set(vals.Index(j))
 		}
 		v.Set(out)
@@ -793,8 +844,24 @@ func decodeAny(s *decodeState) (any, error) {
 			return nil, err
 		}
 		// PHP と同じく数値文字列キーは int に正規化し、重複キーは後勝ちで統合する。
-		intKeys := make(map[int64]any, min(n, 1024))
+		// list 形状 (キーが 0..n-1 で昇順) の間は []any へ直接積み、崩れた時点で map に
+		// 落とす。list / intKeys / strKeys はすべて遅延確保とし、string キーのみの
+		// データに追加コストを載せない。
+		var list []any
+		inList := true
+		var intKeys map[int64]any
 		var strKeys map[string]any
+		spill := func() {
+			// 空 list からの spill では intKeys を作らない (必要になった呼び出し側で遅延確保する)。
+			if len(list) > 0 {
+				intKeys = make(map[int64]any, min(n, 1024))
+				for i, v := range list {
+					intKeys[int64(i)] = v
+				}
+			}
+			list = nil
+			inList = false
+		}
 		for i := 0; i < n; i++ {
 			ktag, err := s.peek()
 			if err != nil {
@@ -829,16 +896,38 @@ func decodeAny(s *decodeState) (any, error) {
 				return nil, err
 			}
 			if isInt {
-				intKeys[ik] = val
+				if inList && ik == int64(len(list)) {
+					if list == nil {
+						list = make([]any, 0, min(n, 1024))
+					}
+					list = append(list, val)
+				} else {
+					if inList {
+						spill()
+					}
+					if intKeys == nil {
+						intKeys = make(map[int64]any, min(n, 1024))
+					}
+					intKeys[ik] = val
+				}
 			} else {
+				if inList {
+					spill()
+				}
 				if strKeys == nil {
-					strKeys = make(map[string]any)
+					strKeys = make(map[string]any, min(n, 1024))
 				}
 				strKeys[sk] = val
 			}
 		}
 		if err := s.expect('}'); err != nil {
 			return nil, err
+		}
+		if inList {
+			if list == nil {
+				return []any{}, nil
+			}
+			return list, nil
 		}
 		// list 形状 (int キーの集合がちょうど {0..n-1}) → []any
 		if len(strKeys) == 0 {
@@ -856,6 +945,11 @@ func decodeAny(s *decodeState) (any, error) {
 				}
 				return out, nil
 			}
+		}
+		// string キーのみなら再構築せずそのまま返す (decodeAny 限定の最適化。
+		// typed map は既存 map の再利用・逐次更新が現行挙動のため対象外)
+		if len(intKeys) == 0 {
+			return strKeys, nil
 		}
 		out := make(map[string]any, len(intKeys)+len(strKeys))
 		for k, v := range intKeys {

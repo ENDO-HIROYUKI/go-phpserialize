@@ -1,8 +1,11 @@
 package phpserialize
 
 import (
+	"fmt"
 	"math"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -240,4 +243,107 @@ func TestRoundTrip(t *testing.T) {
 			t.Errorf("round trip mismatch:\n in  %#v\n got %#v", in, got)
 		}
 	})
+}
+
+// Marshal はエンコードバッファを sync.Pool で再利用するため、返り値の所有権が
+// 呼び出し側に完全に渡ることを固定する (#6)。
+func TestMarshalBufferOwnership(t *testing.T) {
+	t.Run("返り値は後続の Marshal で不変", func(t *testing.T) {
+		first, err := Marshal([]string{"hello", "world"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := string(first)
+		// 異なるサイズの Marshal を挟んでも first が書き換わらないこと
+		if _, err := Marshal(strings.Repeat("x", 300)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Marshal(int64(1)); err != nil {
+			t.Fatal(err)
+		}
+		if string(first) != want {
+			t.Errorf("先行の返り値が破壊された: %q", first)
+		}
+	})
+
+	t.Run("返り値を書き換えても後続に影響しない", func(t *testing.T) {
+		b1, err := Marshal(int64(42))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range b1 {
+			b1[i] = '!'
+		}
+		b2, err := Marshal(int64(42))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "i:42;"; string(b2) != want {
+			t.Errorf("got %q, want %q", b2, want)
+		}
+	})
+
+	t.Run("エラー後の Marshal は正常成功する", func(t *testing.T) {
+		enc := NewEncoder(WithMaxDepth(1))
+		if _, err := enc.Marshal([][]int64{{1}}); err == nil {
+			t.Fatal("深さ超過がエラーにならない")
+		}
+		b, err := enc.Marshal(int64(7))
+		if err != nil {
+			t.Fatalf("エラー後の Marshal が失敗: %v", err)
+		}
+		if want := "i:7;"; string(b) != want {
+			t.Errorf("got %q, want %q", b, want)
+		}
+	})
+
+	t.Run("巨大な結果の後も正常動作する", func(t *testing.T) {
+		// プール容量上限 (256 KiB) を超えるバッファは再利用されない。挙動が変わらないことだけ確認する。
+		big, err := Marshal(strings.Repeat("x", 512<<10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(big) < 512<<10 {
+			t.Errorf("巨大 Marshal の結果が短すぎる: %d", len(big))
+		}
+		b, err := Marshal(int64(1))
+		if err != nil || string(b) != "i:1;" {
+			t.Errorf("got %q, %v", b, err)
+		}
+	})
+}
+
+// 同一 Encoder の並行 Marshal で返り値が混線しないこと (-race で検証)。
+func TestMarshalConcurrent(t *testing.T) {
+	enc := NewEncoder()
+	failures := make(chan string, 16)
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			want := fmt.Sprintf("s:%d:%q;", len(fmt.Sprint(g))+7, fmt.Sprintf("worker-%d", g))
+			var results [][]byte
+			for range 50 {
+				b, err := enc.Marshal(fmt.Sprintf("worker-%d", g))
+				if err != nil {
+					failures <- err.Error()
+					return
+				}
+				results = append(results, b)
+			}
+			// 全 goroutine 終了後の検証に備えて最後にまとめて確認する
+			for _, b := range results {
+				if string(b) != want {
+					failures <- fmt.Sprintf("got %q, want %q", b, want)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(failures)
+	for f := range failures {
+		t.Error(f)
+	}
 }

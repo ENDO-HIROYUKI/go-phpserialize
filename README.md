@@ -82,12 +82,13 @@ err := dec.Unmarshal(data, &v)
 
 ## 性能
 
-WordPress の `_wp_attachment_metadata` 相当のデコード (Apple M1 Pro):
+WordPress の `_wp_attachment_metadata` 相当のデコード (Apple M5、`-benchmem`):
 
 ```
-BenchmarkUnmarshalStruct       941.9 ns/op
-BenchmarkUnmarshalStringSlice  511.1 ns/op
-BenchmarkMarshalStruct         544.0 ns/op
+BenchmarkUnmarshalStruct        2449 ns/op   1096 B/op   18 allocs/op
+BenchmarkUnmarshalAny           3286 ns/op   1768 B/op   43 allocs/op
+BenchmarkUnmarshalStringSlice    642 ns/op    216 B/op    9 allocs/op
+BenchmarkMarshalStruct          1325 ns/op    832 B/op    9 allocs/op
 ```
 
 `unsafe` を使わない分のコストは、安全性と引き換えとして許容している (正しさ優先)。
