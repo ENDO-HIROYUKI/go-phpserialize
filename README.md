@@ -22,10 +22,7 @@ b, err := phpserialize.Marshal(m) // a:2:{s:5:"width";i:1200;s:4:"file";s:5:"a.j
 
 ## なぜ作ったか
 
-[trim21/go-phpserialize](https://github.com/trim21/go-phpserialize) には次の問題があった。
-
-- **不正な形の入力で panic する** — 非連続キーの配列を slice へデコードすると `reflect: slice index out of range` でクラッシュする ([trim21/go-phpserialize#79](https://github.com/trim21/go-phpserialize/issues/79))。WordPress のメタデータなど実データでこの形は普通に発生する。
-- **`go:linkname` / `unsafe` に依存** — v0.0.x は Go 内部 API に依存していたため、Go 1.23 以降でビルド自体を拒否するようになった。
+既存の PHP シリアライズ互換ライブラリの利用では、不正な形の入力 (非連続キーの配列など、WordPress のメタデータでは普通に発生する) での panic や、`go:linkname` / `unsafe` 依存による Go バージョンアップへの追従性に課題があった。
 
 本ライブラリの設計原則:
 
@@ -93,7 +90,7 @@ BenchmarkUnmarshalStringSlice  511.1 ns/op
 BenchmarkMarshalStruct         544.0 ns/op
 ```
 
-unsafe ベースの trim21 v0.1.2 比で約 1.7 倍のコスト。安全性と引き換えとして許容している (正しさ優先)。
+`unsafe` を使わない分のコストは、安全性と引き換えとして許容している (正しさ優先)。
 
 ## セキュリティ
 
