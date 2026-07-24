@@ -180,8 +180,29 @@ func TestUnmarshalSlice(t *testing.T) {
 
 	t.Run("重複キーはエラー", func(t *testing.T) {
 		var got []string
-		if err := Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:0;s:1:"b";}`), &got); err == nil {
-			t.Error("重複キーがエラーにならない")
+		var te *TypeError
+		if err := Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:0;s:1:"b";}`), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
+		}
+	})
+
+	t.Run("重複キーは後続の不正より先に検出される", func(t *testing.T) {
+		// #6 で合意した互換性変更: 重複キーはパース中に早期検出されるため、
+		// 後続データが壊れていても (旧実装の SyntaxError でなく) TypeError が返る。
+		var got []string
+		var te *TypeError
+		if err := Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:0;s:1:"b";`), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
+		}
+	})
+
+	t.Run("数値文字列キーも受理される", func(t *testing.T) {
+		var got []string
+		if err := Unmarshal([]byte(`a:2:{s:1:"1";s:1:"b";i:0;s:1:"a";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"a", "b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v", got)
 		}
 	})
 
@@ -761,30 +782,76 @@ func TestSparsePaddingBudgetConcurrent(t *testing.T) {
 }
 
 func TestSliceDecodePathBoundary(t *testing.T) {
-	// 厳密モードの直接書き込みファストパスは n <= 1024 または n×要素サイズ <= 1 MiB に
-	// 限られる。[4096]byte (4 KiB/要素) では n=1024 がファストパス、n=1025 がバッファ経路。
-	// 両経路が同じ結果を返すことを境界で固定する。
-	build := func(n int) []byte {
+	// 厳密モードの直接書き込みファストパスは n <= maxDirectSliceElems または
+	// n×要素サイズ <= maxDirectSliceBytes に限られる。両経路が同じ結果・同じエラーを
+	// 返すことを境界で固定する。
+	build := func(n int, value func(i int) string) []byte {
 		var b []byte
 		b = append(b, []byte(fmt.Sprintf("a:%d:{", n))...)
 		for i := 0; i < n; i++ {
-			b = append(b, []byte(fmt.Sprintf("i:%d;N;", i))...)
+			b = append(b, []byte(fmt.Sprintf("i:%d;%s", i, value(i)))...)
 		}
 		return append(b, '}')
 	}
-	for _, n := range []int{1024, 1025} {
+
+	t.Run("要素数上限の境界 (要素サイズ条件は超過)", func(t *testing.T) {
+		// [4096]byte では n=maxDirectSliceElems がファストパス、+1 がバッファ経路。
+		for _, n := range []int{maxDirectSliceElems, maxDirectSliceElems + 1} {
+			var got [][4096]byte
+			if err := Unmarshal(build(n, func(int) string { return "N;" }), &got); err != nil {
+				t.Fatalf("n=%d: %v", n, err)
+			}
+			if len(got) != n {
+				t.Errorf("n=%d: len(got) = %d", n, len(got))
+			}
+		}
+	})
+
+	t.Run("バイト数上限の境界 (値の配置も比較)", func(t *testing.T) {
+		// []int64 (8 バイト/要素) では n=131072 でちょうど 1 MiB → ファストパス、
+		// n=131073 でバッファ経路。値をインデックスにして配置の一致を検証する。
+		for _, n := range []int{131072, 131073} {
+			var got []int64
+			if err := Unmarshal(build(n, func(i int) string { return fmt.Sprintf("i:%d;", i) }), &got); err != nil {
+				t.Fatalf("n=%d: %v", n, err)
+			}
+			if len(got) != n {
+				t.Fatalf("n=%d: len(got) = %d", n, len(got))
+			}
+			for _, i := range []int{0, 1, n / 2, n - 1} {
+				if got[i] != int64(i) {
+					t.Errorf("n=%d: got[%d] = %d", n, i, got[i])
+				}
+			}
+		}
+	})
+
+	t.Run("バッファ経路でも重複キーはエラー", func(t *testing.T) {
+		// n=1025 × [4096]byte はバッファ経路。ファストパスと同じく TypeError になる。
+		b := build(maxDirectSliceElems+1, func(int) string { return "N;" })
+		in := strings.Replace(string(b), "i:1;N;", "i:0;N;", 1) // キー 1 を 0 に重複させる
 		var got [][4096]byte
-		if err := Unmarshal(build(n), &got); err != nil {
-			t.Fatalf("n=%d: %v", n, err)
+		var te *TypeError
+		if err := Unmarshal([]byte(in), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
 		}
-		if len(got) != n {
-			t.Errorf("n=%d: len(got) = %d", n, len(got))
+	})
+
+	t.Run("バッファ経路でも非連続キーはエラー", func(t *testing.T) {
+		b := build(maxDirectSliceElems+1, func(int) string { return "N;" })
+		in := strings.Replace(string(b), "i:1;N;", "i:2000;N;", 1) // 範囲外キー
+		var got [][4096]byte
+		var te *TypeError
+		if err := Unmarshal([]byte(in), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
 		}
-	}
+	})
 
 	t.Run("上限超えの不正入力で全量先行確保しない", func(t *testing.T) {
 		// n=100000 × [4096]byte (約 400 MiB 相当) を宣言しつつ先頭要素で不正になる入力。
 		// バッファ経路に落ちるため、確保量は一時バッファ (最大 1024 要素 ≈ 4 MiB) に留まる。
+		// TotalAlloc はプロセス全体の累積値のため、このパッケージのテストが t.Parallel を
+		// 使わないことが判定精度の前提 (正常 ≈ 5 MiB / 退行 ≈ 400 MiB でマージンは十分)。
 		var b []byte
 		b = append(b, []byte("a:100000:{")...)
 		for len(b) < 700_000 { // ヘッダ検証 (宣言個数 × 最小要素サイズ <= 残り入力) を通す長さ
@@ -792,7 +859,6 @@ func TestSliceDecodePathBoundary(t *testing.T) {
 		}
 		b = append(b, '}')
 		var ms1, ms2 runtime.MemStats
-		runtime.GC()
 		runtime.ReadMemStats(&ms1)
 		var got [][4096]byte
 		err := Unmarshal(b, &got)
@@ -1011,6 +1077,16 @@ func TestUnmarshalAny(t *testing.T) {
 			t.Fatal(err)
 		}
 		if want := map[string]any{"-1": "a"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v", got)
+		}
+	})
+
+	t.Run("正準数値文字列キーで list が継続する", func(t *testing.T) {
+		var got any
+		if err := Unmarshal([]byte(`a:2:{i:0;s:1:"a";s:1:"1";s:1:"b";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"a", "b"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("got %#v", got)
 		}
 	})

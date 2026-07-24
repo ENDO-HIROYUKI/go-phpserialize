@@ -82,7 +82,7 @@ err := dec.Unmarshal(data, &v)
 
 ## 性能
 
-WordPress の `_wp_attachment_metadata` 相当のデコード (Apple M1 Pro、`-benchmem`):
+WordPress の `_wp_attachment_metadata` 相当のデコード (Apple M5、`-benchmem`):
 
 ```
 BenchmarkUnmarshalStruct        2449 ns/op   1096 B/op   18 allocs/op

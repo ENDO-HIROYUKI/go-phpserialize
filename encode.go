@@ -11,6 +11,7 @@ import (
 
 // encBufPool はエンコードバッファの再利用プール。状態汚染を持ち込まないよう
 // []byte だけをプールし、encodeState (depth / cfg) は呼び出しごとに作る。
+// 初期容量 512 は WP メタ等の典型ペイロードを 1 確保で収める目安。
 var encBufPool = sync.Pool{New: func() any { b := make([]byte, 0, 512); return &b }}
 
 // maxPooledEncBuf を超える容量のバッファはプールへ戻さない

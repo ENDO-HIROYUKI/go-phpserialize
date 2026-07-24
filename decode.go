@@ -60,8 +60,9 @@ func (s *decodeState) peek() (byte, error) {
 	return 0, s.errUnexpectedEnd()
 }
 
-// expect は現在位置のバイトが c であることを検証して 1 バイト進める
-// (ホットパスなのでインライン化可能な形を保ち、エラー構築は expectSlow に外出しする)。
+// expect は現在位置のバイトが c であることを検証して 1 バイト進める。
+// ホットパスを短く保つためエラー構築は expectSlow に外出しする
+// (それでもインライン化予算には僅かに届かない。peek はインライン化される)。
 func (s *decodeState) expect(c byte) error {
 	if s.off < len(s.data) && s.data[s.off] == c {
 		s.off++
