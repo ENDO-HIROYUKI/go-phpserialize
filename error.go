@@ -15,6 +15,8 @@ var (
 	ErrTrailingData = errors.New("phpserialize: trailing data after value")
 	// ErrInvalidTarget は Unmarshal の第 2 引数が nil でないポインタ以外だったときのエラー。
 	ErrInvalidTarget = errors.New("phpserialize: unmarshal target must be a non-nil pointer")
+	// ErrSparsePaddingBudget は疎配列パディングの累積量がバジェットを超えたときのエラー。
+	ErrSparsePaddingBudget = errors.New("phpserialize: sparse array padding budget exceeded")
 )
 
 // SyntaxError は入力が PHP シリアライズ形式として不正な場合のエラー。

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -355,6 +356,11 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		return nil, err
 	}
 	elemType := t.Elem()
+	// パディングチャージ用の要素サイズ。ゼロサイズ型でも除算できるよう最低 1 バイトとみなす。
+	esize := elemType.Size()
+	if esize == 0 {
+		esize = 1
+	}
 	return withNull(func(s *decodeState, v reflect.Value) error {
 		off := s.off
 		tag, err := s.peek()
@@ -425,6 +431,21 @@ func compileSliceDecMode(t reflect.Type, sparseEnabled bool) (decFunc, error) {
 		outLen := n
 		if sparse {
 			outLen = int(maxKey + 1)
+			// 重複キーはゼロ埋めを減らさないため、エントリ数ではなくユニークキー数で
+			// パディングを算出する (O(n log n)、n は入力サイズに比例するので安全)。
+			sorted := slices.Clone(idxs)
+			slices.Sort(sorted)
+			uniq := len(slices.Compact(sorted))
+			// パディング (ゼロ埋め要素数 × 要素型サイズ) を残りバジェットにチャージする。
+			if pad := outLen - uniq; pad > 0 {
+				// 乗算のオーバーフローを避けるため除算で超過を判定する
+				if uintptr(pad) > uintptr(s.sparsePadRemaining)/esize {
+					// 積 (pad × esize) は int を超え得るため計算せず、要素数と要素サイズを個別に表示する
+					return fmt.Errorf("%w at offset %d: padding %d elements x %d bytes/element exceeds remaining %d bytes",
+						ErrSparsePaddingBudget, off, pad, esize, s.sparsePadRemaining)
+				}
+				s.sparsePadRemaining -= int(uintptr(pad) * esize)
+			}
 		}
 		out := reflect.MakeSlice(t, outLen, outLen)
 		var seen []bool

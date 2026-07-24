@@ -17,7 +17,7 @@ func (d *Decoder) Unmarshal(data []byte, v any) error {
 	if err != nil {
 		return err
 	}
-	s := &decodeState{data: data, cfg: &d.cfg}
+	s := &decodeState{data: data, cfg: &d.cfg, sparsePadRemaining: d.cfg.sparsePaddingBudget}
 	if err := plan(s, rv.Elem()); err != nil {
 		return err
 	}
@@ -32,6 +32,8 @@ type decodeState struct {
 	off   int
 	depth int
 	cfg   *config
+	// sparsePadRemaining は疎配列パディングの残りバジェット (バイト)。デコード 1 回ごとにリセットされる。
+	sparsePadRemaining int
 }
 
 func (s *decodeState) syntaxErr(off int, format string, args ...any) error {
