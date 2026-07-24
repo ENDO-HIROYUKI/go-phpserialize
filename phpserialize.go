@@ -12,9 +12,10 @@ package phpserialize
 const DefaultMaxDepth = 4096
 
 type config struct {
-	maxDepth      int
-	weakTypes     bool
-	allowTrailing bool
+	maxDepth           int
+	weakTypes          bool
+	allowTrailing      bool
+	sparseArrayPadding bool
 }
 
 func defaultConfig() config {
@@ -37,6 +38,11 @@ func WithMaxDepth(n int) Option {
 // WordPress のメタデータのように数値が文字列で保存されているデータのデコードに使う。
 func WithWeakTypes() Option {
 	return func(c *config) { c.weakTypes = true }
+}
+
+// WithSparseArrayPadding は trim21/go-phpserialize v0.0.x 互換の疎配列を扱うために使う。
+func WithSparseArrayPadding() Option {
+	return func(c *config) { c.sparseArrayPadding = true }
 }
 
 // WithAllowTrailingData は値の後に余分なバイトが残っていてもエラーにしない。

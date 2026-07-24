@@ -62,12 +62,17 @@ PHP に忠実な点: 文字列はバイト長で扱う (マルチバイト安全
 
 ```go
 dec := phpserialize.NewDecoder(
-    phpserialize.WithWeakTypes(),         // PHP 的な弱い型変換 (例: s:"1200" → int)。WP メタ向け
-    phpserialize.WithAllowTrailingData(), // 末尾ゴミを許容 (PHP の実挙動に相当)
+    phpserialize.WithWeakTypes(),          // PHP 的な弱い型変換 (例: s:"1200" → int)。WP メタ向け
+    phpserialize.WithSparseArrayPadding(), // 疎配列を最大キーまでゼロ値で埋めて slice にデコード
+    phpserialize.WithAllowTrailingData(),  // 末尾ゴミを許容 (PHP の実挙動に相当)
     phpserialize.WithMaxDepth(4096),
 )
 err := dec.Unmarshal(data, &v)
 ```
+
+### 疎配列の slice デコード
+
+`WithSparseArrayPadding()` を指定すると、非負整数キーまたは正準形の数値文字列キーを持つ PHP 配列を、最大キーまでゼロ値で埋めた slice にデコードする。重複キーは PHP と同じく入力順の後勝ちになる。復元後の長さは最大 `1 << 20` で、負キーと上限以上のキーはエラーになる。`[]byte` と固定長配列には適用されない。
 
 `Marshaler` / `Unmarshaler` インターフェースで型ごとのカスタム表現も定義できる。
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"sync"
 	"testing"
 )
 
@@ -200,6 +201,183 @@ func TestUnmarshalSlice(t *testing.T) {
 			t.Error("要素数不一致がエラーにならない")
 		}
 	})
+}
+
+func TestSparseArrayPadding(t *testing.T) {
+	dec := NewDecoder(WithSparseArrayPadding())
+
+	t.Run("疎配列をゼロ値で埋める", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:5;s:1:"b";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"a", "", "", "", "", "b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("順不同キー", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:3:{i:5;s:1:"f";i:0;s:1:"a";i:2;s:1:"c";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"a", "", "c", "", "", "f"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("重複キーは後勝ち", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:0;s:1:"b";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"b"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("最大キー位置の重複は後勝ち", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:3:{i:1;s:1:"a";i:5;s:1:"b";i:5;s:1:"c";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"", "a", "", "", "", "c"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("最大キーの安全上限", func(t *testing.T) {
+		var got []bool
+		if err := dec.Unmarshal([]byte(`a:1:{i:1048575;b:1;}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		want := make([]bool, 1<<20)
+		want[len(want)-1] = true
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("長さまたは最大キー位置の値が不一致: len=%d", len(got))
+		}
+
+		var tooLarge []bool
+		var te *TypeError
+		if err := dec.Unmarshal([]byte(`a:1:{i:1048576;b:1;}`), &tooLarge); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
+		}
+	})
+
+	t.Run("任意のネスト深さ", func(t *testing.T) {
+		var inStruct struct {
+			Items []string `php:"items"`
+		}
+		if err := dec.Unmarshal([]byte(`a:1:{s:5:"items";a:1:{i:2;s:1:"x";}}`), &inStruct); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"", "", "x"}; !reflect.DeepEqual(inStruct.Items, want) {
+			t.Errorf("struct 内 slice: got %v, want %v", inStruct.Items, want)
+		}
+
+		var nested [][]string
+		if err := dec.Unmarshal([]byte(`a:2:{i:0;a:1:{i:2;s:1:"a";}i:2;a:1:{i:1;s:1:"b";}}`), &nested); err != nil {
+			t.Fatal(err)
+		}
+		if want := [][]string{{"", "", "a"}, nil, {"", "b"}}; !reflect.DeepEqual(nested, want) {
+			t.Errorf("slice of slice: got %v, want %v", nested, want)
+		}
+
+		var inMap map[string][]string
+		if err := dec.Unmarshal([]byte(`a:1:{s:1:"k";a:1:{i:2;s:1:"v";}}`), &inMap); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[string][]string{"k": {"", "", "v"}}; !reflect.DeepEqual(inMap, want) {
+			t.Errorf("map 値の slice: got %v, want %v", inMap, want)
+		}
+	})
+
+	t.Run("数値文字列キー", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:1:{s:1:"5";s:1:"x";}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"", "", "", "", "", "x"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("負キーはエラー", func(t *testing.T) {
+		var got []string
+		var te *TypeError
+		if err := dec.Unmarshal([]byte(`a:1:{i:-1;s:1:"x";}`), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
+		}
+	})
+
+	t.Run("固定長配列は厳密", func(t *testing.T) {
+		var got [5]string
+		var te *TypeError
+		if err := dec.Unmarshal([]byte(`a:1:{i:4;s:1:"x";}`), &got); !errors.As(err, &te) {
+			t.Errorf("TypeError が返らない: %v", err)
+		}
+
+		var nested [1][]string
+		if err := dec.Unmarshal([]byte(`a:1:{i:0;a:1:{i:2;s:1:"x";}}`), &nested); err != nil {
+			t.Fatal(err)
+		}
+		if want := [1][]string{{"", "", "x"}}; !reflect.DeepEqual(nested, want) {
+			t.Errorf("固定長配列の要素の slice: got %v, want %v", nested, want)
+		}
+	})
+
+	t.Run("既定は厳密", func(t *testing.T) {
+		for _, in := range []string{
+			`a:2:{i:0;s:1:"a";i:5;s:1:"b";}`,
+			`a:2:{i:0;s:1:"a";i:0;s:1:"b";}`,
+			`a:1:{i:-1;s:1:"a";}`,
+		} {
+			var got []string
+			var te *TypeError
+			if err := Unmarshal([]byte(in), &got); !errors.As(err, &te) {
+				t.Errorf("%s: TypeError が返らない: %v", in, err)
+			}
+		}
+	})
+
+	t.Run("空配列は非 nil", func(t *testing.T) {
+		var got []string
+		if err := dec.Unmarshal([]byte(`a:0:{}`), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{}; !reflect.DeepEqual(got, want) {
+			t.Errorf("got %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestSparseArrayPaddingConcurrent(t *testing.T) {
+	dec := NewDecoder(WithSparseArrayPadding())
+	want := []string{"a", "", "", "", "", "b"}
+	failures := make(chan string, 16)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				var got []string
+				if err := dec.Unmarshal([]byte(`a:2:{i:0;s:1:"a";i:5;s:1:"b";}`), &got); err != nil {
+					failures <- err.Error()
+					return
+				}
+				if !reflect.DeepEqual(got, want) {
+					failures <- "デコード結果が不一致"
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(failures)
+	for failure := range failures {
+		t.Error(failure)
+	}
 }
 
 func TestUnmarshalMap(t *testing.T) {
